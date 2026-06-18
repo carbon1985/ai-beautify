@@ -1,0 +1,10 @@
+Looking in indexes: https://mirrors.aliyun.com/pypi/simple/
+Collecting customtkinter
+  Downloading customtkinter-5.2.2-py3-none-any.whl (296 kB)
+Requirement already satisfied: Pillow in /home/meizu/anaconda3/envs/ai-beautify/lib/python3.10/site-packages (12.2.0)
+Collecting darkdetect (from customtkinter)
+  Downloading darkdetect-0.8.0-py3-none-any.whl (9.0 kB)
+Requirement already satisfied: packaging in /home/meizu/anaconda3/envs/ai-beautify/lib/python3.10/site-packages (from customtkinter) (26.2)
+Installing collected packages: darkdetect, customtkinter
+
+Successfully installed customtkinter-5.2.2 darkdetect-0.8.0
