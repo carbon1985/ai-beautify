@@ -13,6 +13,7 @@ class ImageProcessor:
         )
         self.original_image = None
         self.landmarks = None
+        self.landmark_preview = None
         self.height = 0
         self.width = 0
         
@@ -30,6 +31,7 @@ class ImageProcessor:
             return False
             
         self.original_image = img
+        self.landmark_preview = None
         self.height, self.width = img.shape[:2]
         
         self.base_map_x, self.base_map_y = np.meshgrid(np.arange(self.width), np.arange(self.height))
@@ -53,6 +55,44 @@ class ImageProcessor:
     def _get_pt(self, idx):
         pt = self.landmarks.landmark[idx]
         return (int(pt.x * self.width), int(pt.y * self.height))
+
+    def get_landmark_preview(self):
+        if self.original_image is None:
+            return None
+
+        if self.landmark_preview is not None:
+            return self.landmark_preview
+
+        preview = self.original_image.copy()
+        if self.landmarks is None:
+            self.landmark_preview = preview
+            return self.landmark_preview
+
+        line_thickness = max(1, round(min(self.width, self.height) / 700))
+        point_radius = max(1, round(min(self.width, self.height) / 450))
+
+        for start_idx, end_idx in self.mp_face_mesh.FACEMESH_TESSELATION:
+            cv2.line(
+                preview,
+                self._get_pt(start_idx),
+                self._get_pt(end_idx),
+                (255, 190, 40),
+                line_thickness,
+                cv2.LINE_AA
+            )
+
+        for index in range(len(self.landmarks.landmark)):
+            cv2.circle(
+                preview,
+                self._get_pt(index),
+                point_radius,
+                (40, 230, 255),
+                -1,
+                cv2.LINE_AA
+            )
+
+        self.landmark_preview = preview
+        return self.landmark_preview
         
     def _generate_masks(self):
         face_oval = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]

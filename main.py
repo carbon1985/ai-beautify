@@ -1,8 +1,8 @@
 import customtkinter as ctk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
+from concurrent.futures import ThreadPoolExecutor
 from PIL import Image
 import cv2
-import numpy as np
 from image_processor import ImageProcessor
 
 class AIBeautifyApp(ctk.CTk):
@@ -17,6 +17,12 @@ class AIBeautifyApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
         
         self.processor = ImageProcessor()
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.processed_image = None
+        self.loading_dialog = None
+        self.loading_progress = None
+        self.is_closing = False
+        self.show_landmarks = ctk.BooleanVar(value=False)
         
         self.global_params = {
             "smooth": 0.0,
@@ -41,6 +47,7 @@ class AIBeautifyApp(ctk.CTk):
         self.setup_ui()
         
         self.bind("<Configure>", self.on_resize)
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.resize_after_id = None
         
     def setup_ui(self):
@@ -53,6 +60,14 @@ class AIBeautifyApp(ctk.CTk):
         
         self.title_label = ctk.CTkLabel(self.top_frame, text="AI Beautify", font=("Roboto", 24, "bold"))
         self.title_label.pack(side="left", padx=20, pady=10)
+
+        self.landmark_switch = ctk.CTkSwitch(
+            self.top_frame,
+            text="显示网格关键点",
+            variable=self.show_landmarks,
+            command=self.on_landmark_toggle
+        )
+        self.landmark_switch.pack(side="left", padx=10, pady=10)
         
         self.btn_export = ctk.CTkButton(self.top_frame, text="Export Image", command=self.export_image)
         self.btn_export.pack(side="right", padx=10, pady=10)
@@ -95,6 +110,7 @@ class AIBeautifyApp(ctk.CTk):
         
         self.slider = ctk.CTkSlider(self.feature_edit_frame, from_=0, to=1.0, width=400, command=self.on_slider_change)
         self.slider.pack(pady=10, padx=20, fill="x")
+        self.slider.bind("<ButtonRelease-1>", self.on_slider_release)
         
         self.btn_frame = ctk.CTkFrame(self.feature_edit_frame, fg_color="transparent")
         self.btn_frame.pack(pady=5)
@@ -108,17 +124,37 @@ class AIBeautifyApp(ctk.CTk):
     def import_image(self):
         file_path = filedialog.askopenfilename(filetypes=[("Image Files", "*.jpg *.jpeg *.png")])
         if file_path:
-            if self.processor.load_image(file_path):
-                self.update_images(update_left=True, update_right=True)
-            else:
-                print("Failed to load image.")
+            params = self.global_params.copy()
+
+            def load_and_process():
+                if not self.processor.load_image(file_path):
+                    raise ValueError("无法读取所选图片。")
+                return self.processor.process(params)
+
+            def show_imported_images(processed_image):
+                self.processed_image = processed_image
+                self._show_input_image()
+                self._show_image(self.lbl_img_right, processed_image)
+
+            self._submit_background(load_and_process, show_imported_images, "正在分析并处理图片…")
 
     def export_image(self):
         if self.processor.original_image is not None:
             file_path = filedialog.asksaveasfilename(defaultextension=".jpg", filetypes=[("JPEG", "*.jpg"), ("PNG", "*.png")])
             if file_path:
-                res_img = self.processor.process(self.global_params)
-                cv2.imwrite(file_path, res_img)
+                params = self.global_params.copy()
+
+                def process_and_save():
+                    result = self.processor.process(params)
+                    if not cv2.imwrite(file_path, result):
+                        raise IOError("图片导出失败。")
+                    return result
+
+                def export_finished(result):
+                    self.processed_image = result
+                    messagebox.showinfo("导出完成", "图片已成功导出。", parent=self)
+
+                self._submit_background(process_and_save, export_finished, "正在导出图片…")
 
     def _cv2_to_ctk_image(self, img):
         if img is None:
@@ -144,18 +180,96 @@ class AIBeautifyApp(ctk.CTk):
             
         return ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(new_width, new_height))
 
-    def update_images(self, update_left=False, update_right=True):
+    def _show_image(self, label, image):
+        ctk_image = self._cv2_to_ctk_image(image)
+        label.configure(image=ctk_image, text="")
+
+    def _show_input_image(self):
         if self.processor.original_image is None:
             return
-            
-        if update_left:
-            ctk_img_left = self._cv2_to_ctk_image(self.processor.original_image)
-            self.lbl_img_left.configure(image=ctk_img_left, text="")
-            
-        if update_right:
-            res_img = self.processor.process(self.global_params)
-            ctk_img_right = self._cv2_to_ctk_image(res_img)
-            self.lbl_img_right.configure(image=ctk_img_right, text="")
+
+        image = (
+            self.processor.get_landmark_preview()
+            if self.show_landmarks.get()
+            else self.processor.original_image
+        )
+        self._show_image(self.lbl_img_left, image)
+
+    def _refresh_displayed_images(self):
+        if self.processor.original_image is not None:
+            self._show_input_image()
+        if self.processed_image is not None:
+            self._show_image(self.lbl_img_right, self.processed_image)
+
+    def _process_current_params(self):
+        if self.processor.original_image is None:
+            return
+
+        params = self.global_params.copy()
+
+        def process():
+            return self.processor.process(params)
+
+        def show_result(result):
+            self.processed_image = result
+            self._show_image(self.lbl_img_right, result)
+
+        self._submit_background(process, show_result, "正在应用美化效果…")
+
+    def _submit_background(self, task, on_success, loading_text):
+        self._show_loading(loading_text)
+        future = self.executor.submit(task)
+        self.after(50, lambda: self._poll_future(future, on_success))
+
+    def _poll_future(self, future, on_success):
+        if self.is_closing:
+            return
+        if not future.done():
+            self.after(50, lambda: self._poll_future(future, on_success))
+            return
+
+        self._hide_loading()
+        try:
+            result = future.result()
+        except Exception as exc:
+            messagebox.showerror("处理失败", str(exc), parent=self)
+            return
+        on_success(result)
+
+    def _show_loading(self, text):
+        if self.loading_dialog is not None:
+            self.loading_dialog.destroy()
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("处理中")
+        dialog.geometry("320x150")
+        dialog.resizable(False, False)
+        dialog.transient(self)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        ctk.CTkLabel(dialog, text=text, font=("Roboto", 16, "bold")).pack(pady=(28, 16))
+        progress = ctk.CTkProgressBar(dialog, width=240, mode="indeterminate")
+        progress.pack()
+        progress.start()
+
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - dialog.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.grab_set()
+        dialog.focus_force()
+
+        self.loading_dialog = dialog
+        self.loading_progress = progress
+
+    def _hide_loading(self):
+        if self.loading_progress is not None:
+            self.loading_progress.stop()
+            self.loading_progress = None
+        if self.loading_dialog is not None:
+            self.loading_dialog.grab_release()
+            self.loading_dialog.destroy()
+            self.loading_dialog = None
 
     def open_feature_panel(self, f_id, f_name):
         self.active_feature_id = f_id
@@ -170,14 +284,19 @@ class AIBeautifyApp(ctk.CTk):
     def on_slider_change(self, value):
         if self.active_feature_id:
             self.global_params[self.active_feature_id] = float(value)
-            self.update_images(update_left=False, update_right=True)
+
+    def on_slider_release(self, _event):
+        self._process_current_params()
+
+    def on_landmark_toggle(self):
+        self._show_input_image()
 
     def on_reset_click(self):
         if self.active_feature_id:
             val = self.temp_params_snapshot[self.active_feature_id]
             self.global_params[self.active_feature_id] = val
             self.slider.set(val)
-            self.update_images(update_left=False, update_right=True)
+            self._process_current_params()
 
     def on_exit_click(self):
         self.active_feature_id = None
@@ -191,8 +310,14 @@ class AIBeautifyApp(ctk.CTk):
             self.resize_after_id = self.after(200, self._debounced_resize)
             
     def _debounced_resize(self):
-        if self.processor.original_image is not None:
-            self.update_images(update_left=True, update_right=True)
+        if self.loading_dialog is None and self.processor.original_image is not None:
+            self._refresh_displayed_images()
+
+    def on_close(self):
+        self.is_closing = True
+        self._hide_loading()
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        self.destroy()
 
 if __name__ == "__main__":
     app = AIBeautifyApp()
