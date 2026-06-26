@@ -3,6 +3,8 @@ import mediapipe as mp
 import numpy as np
 
 class ImageProcessor:
+    FACE_OVAL = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+
     def __init__(self):
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(
@@ -56,6 +58,21 @@ class ImageProcessor:
         pt = self.landmarks.landmark[idx]
         return (int(pt.x * self.width), int(pt.y * self.height))
 
+    def _get_expanded_face_points(self, indices):
+        pts = np.array([self._get_pt(i) for i in indices], dtype=np.float32)
+        center = pts.mean(axis=0)
+        expanded = pts.copy()
+
+        for i, pt in enumerate(pts):
+            vector = pt - center
+            x_scale = 1.12
+            y_scale = 1.22 if pt[1] < center[1] else 1.10
+            expanded[i] = center + np.array([vector[0] * x_scale, vector[1] * y_scale], dtype=np.float32)
+
+        expanded[:, 0] = np.clip(expanded[:, 0], 0, self.width - 1)
+        expanded[:, 1] = np.clip(expanded[:, 1], 0, self.height - 1)
+        return expanded.astype(np.int32)
+
     def get_landmark_preview(self):
         if self.original_image is None:
             return None
@@ -91,11 +108,20 @@ class ImageProcessor:
                 cv2.LINE_AA
             )
 
+        processing_contour = self._get_expanded_face_points(self.FACE_OVAL).reshape((-1, 1, 2))
+        cv2.polylines(
+            preview,
+            [processing_contour],
+            True,
+            (80, 255, 120),
+            max(2, line_thickness + 1),
+            cv2.LINE_AA
+        )
+
         self.landmark_preview = preview
         return self.landmark_preview
         
     def _generate_masks(self):
-        face_oval = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288, 397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136, 172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
         left_eye = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246]
         right_eye = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398]
         lips = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0, 37, 39, 40, 185]
@@ -108,15 +134,17 @@ class ImageProcessor:
             pts = np.array([self._get_pt(i) for i in indices], np.int32)
             pts = pts.reshape((-1, 1, 2))
             cv2.fillPoly(mask, [pts], color)
-            
-        draw_poly(face_oval, 255)
+
+        face_pts = self._get_expanded_face_points(self.FACE_OVAL).reshape((-1, 1, 2))
+        cv2.fillPoly(mask, [face_pts], 255)
         draw_poly(left_eye, 0)
         draw_poly(right_eye, 0)
         draw_poly(lips, 0)
         draw_poly(left_eyebrow, 0)
         draw_poly(right_eyebrow, 0)
         
-        mask = cv2.GaussianBlur(mask, (51, 51), 0)
+        blur_size = max(51, int(min(self.width, self.height) * 0.06) | 1)
+        mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
         self.skin_mask = (mask / 255.0).astype(np.float32)
         self.skin_mask = np.expand_dims(self.skin_mask, axis=2)
 
