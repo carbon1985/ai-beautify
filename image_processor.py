@@ -128,21 +128,51 @@ class ImageProcessor:
         left_eyebrow = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46]
         right_eyebrow = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276]
         
-        mask = np.zeros((self.height, self.width), dtype=np.uint8)
+        face_mask = np.zeros((self.height, self.width), dtype=np.uint8)
         
         def draw_poly(indices, color):
             pts = np.array([self._get_pt(i) for i in indices], np.int32)
             pts = pts.reshape((-1, 1, 2))
-            cv2.fillPoly(mask, [pts], color)
+            cv2.fillPoly(face_mask, [pts], color)
 
         face_pts = self._get_expanded_face_points(self.FACE_OVAL).reshape((-1, 1, 2))
-        cv2.fillPoly(mask, [face_pts], 255)
+        cv2.fillPoly(face_mask, [face_pts], 255)
         draw_poly(left_eye, 0)
         draw_poly(right_eye, 0)
         draw_poly(lips, 0)
         draw_poly(left_eyebrow, 0)
         draw_poly(right_eyebrow, 0)
-        
+
+        chin = np.array(self._get_pt(152), dtype=np.float32)
+        left_jaw = np.array(self._get_pt(172), dtype=np.float32)
+        right_jaw = np.array(self._get_pt(397), dtype=np.float32)
+        left_face = np.array(self._get_pt(234), dtype=np.float32)
+        right_face = np.array(self._get_pt(454), dtype=np.float32)
+        face_width = np.linalg.norm(left_face - right_face)
+        neck_width = face_width * 0.36
+        neck_bottom_y = min(self.height - 1, chin[1] + face_width * 0.55)
+        neck_mask = np.zeros_like(face_mask)
+        neck_pts = np.array([
+            left_jaw,
+            right_jaw,
+            [chin[0] + neck_width, neck_bottom_y],
+            [chin[0] - neck_width, neck_bottom_y],
+        ], dtype=np.int32).reshape((-1, 1, 2))
+        cv2.fillPoly(neck_mask, [neck_pts], 255)
+
+        ycrcb = cv2.cvtColor(self.original_image, cv2.COLOR_BGR2YCrCb).astype(np.float32)
+        sample_pixels = ycrcb[face_mask > 200]
+        color_mask = np.zeros_like(face_mask)
+        if len(sample_pixels) > 0:
+            median_cr = np.median(sample_pixels[:, 1])
+            median_cb = np.median(sample_pixels[:, 2])
+            cr_diff = ycrcb[:, :, 1] - median_cr
+            cb_diff = ycrcb[:, :, 2] - median_cb
+            color_distance = np.sqrt(cr_diff * cr_diff + cb_diff * cb_diff)
+            color_mask = np.clip(1.0 - color_distance / 34.0, 0.0, 1.0)
+            color_mask = (color_mask * 255).astype(np.uint8)
+
+        mask = np.maximum(face_mask, cv2.bitwise_and(neck_mask, color_mask))
         blur_size = max(51, int(min(self.width, self.height) * 0.06) | 1)
         mask = cv2.GaussianBlur(mask, (blur_size, blur_size), 0)
         self.skin_mask = (mask / 255.0).astype(np.float32)
@@ -161,19 +191,49 @@ class ImageProcessor:
         filtered = img.astype(np.float32)
         
         if smooth > 0.0:
-            d = 15
-            sigmaColor = 75 * smooth
-            sigmaSpace = 75 * smooth
-            smoothed = cv2.bilateralFilter(img, d, sigmaColor, sigmaSpace)
-            filtered = img * (1 - self.skin_mask) + smoothed * self.skin_mask
+            strength = float(np.clip(smooth, 0.0, 1.0) ** 0.55)
+            min_size = min(self.width, self.height)
+            diameter = int(11 + min_size * 0.035 * strength)
+            diameter = max(11, min(45, diameter | 1))
+            sigma_color = 70 + 170 * strength
+            sigma_space = 55 + 150 * strength
+            texture_kernel = int(3 + min_size * 0.012 * strength)
+            texture_kernel = max(3, min(17, texture_kernel | 1))
+
+            source = filtered.astype(np.uint8)
+            edge_base = cv2.bilateralFilter(source, diameter, sigma_color, sigma_space)
+            edge_base = cv2.bilateralFilter(
+                edge_base,
+                max(9, (diameter // 2) | 1),
+                sigma_color * 0.7,
+                sigma_space * 0.7
+            )
+            smooth_base = cv2.GaussianBlur(edge_base, (texture_kernel, texture_kernel), 0).astype(np.float32)
+
+            detail_layer = filtered - smooth_base
+            detail_keep = max(0.06, 1.0 - 0.94 * strength)
+            smoothed = smooth_base + detail_layer * detail_keep
+
+            lab = cv2.cvtColor(np.clip(smoothed, 0, 255).astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+            lab_base = cv2.GaussianBlur(lab, (texture_kernel, texture_kernel), 0)
+            lab[:, :, 0] = lab[:, :, 0] * (1 - 0.18 * strength) + lab_base[:, :, 0] * (0.18 * strength)
+            lab[:, :, 1] = lab[:, :, 1] * (1 - 0.28 * strength) + lab_base[:, :, 1] * (0.28 * strength)
+            lab[:, :, 2] = lab[:, :, 2] * (1 - 0.28 * strength) + lab_base[:, :, 2] * (0.28 * strength)
+            smoothed = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR).astype(np.float32)
+
+            smooth_mask = self.skin_mask * (0.55 + 0.45 * strength)
+            filtered = filtered * (1 - smooth_mask) + smoothed * smooth_mask
             
         if whiten > 0.0:
-            hsv = cv2.cvtColor(filtered.astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-            hsv[:, :, 1] = hsv[:, :, 1] * (1 - 0.2 * whiten)
-            hsv[:, :, 2] = hsv[:, :, 2] + (255 - hsv[:, :, 2]) * (0.3 * whiten)
-            hsv = np.clip(hsv, 0, 255).astype(np.uint8)
-            whitened = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32)
-            filtered = filtered * (1 - self.skin_mask) + whitened * self.skin_mask
+            strength = float(np.clip(whiten, 0.0, 1.0) ** 0.8)
+            lab = cv2.cvtColor(filtered.astype(np.uint8), cv2.COLOR_BGR2LAB).astype(np.float32)
+            lab[:, :, 0] = lab[:, :, 0] + (255 - lab[:, :, 0]) * (0.18 * strength)
+            lab[:, :, 2] = lab[:, :, 2] - (lab[:, :, 2] - 128) * (0.12 * strength)
+            lab = np.clip(lab, 0, 255).astype(np.uint8)
+            whitened = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR).astype(np.float32)
+
+            whiten_mask = self.skin_mask * (0.25 + 0.55 * strength)
+            filtered = filtered * (1 - whiten_mask) + whitened * whiten_mask
             
         return np.clip(filtered, 0, 255).astype(np.uint8)
 
