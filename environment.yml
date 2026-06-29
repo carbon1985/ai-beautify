@@ -12,3 +12,10 @@ dependencies:
     - mediapipe==0.10.14
     - numpy>=1.24.0
     - scipy>=1.11.0
+    - scikit-image>=0.22.0
+    - torch>=2.2.0
+    - diffusers>=0.27.0
+    - transformers>=4.39.0
+    - accelerate>=0.28.0
+    - safetensors>=0.4.2
+    - onnxruntime>=1.17.0
